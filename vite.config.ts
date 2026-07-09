@@ -43,6 +43,22 @@ interface VoiceShape {
   vol: number;
 }
 
+const DEFAULT_LLM_RELAY_HOST = '127.0.0.1';
+const DEFAULT_LLM_RELAY_PORT = 18788;
+
+function resolveLlmRelay(mode: string) {
+  const env = loadEnv(mode, process.cwd(), '');
+  const host = env.LLM_RELAY_HOST || env.VITE_LLM_RELAY_HOST || DEFAULT_LLM_RELAY_HOST;
+  const rawPort = env.LLM_RELAY_PORT || env.VITE_LLM_RELAY_PORT || String(DEFAULT_LLM_RELAY_PORT);
+  const port = Number.parseInt(rawPort, 10);
+
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid LLM relay port: ${rawPort}`);
+  }
+
+  return { host, port };
+}
+
 function readJson(req: IncomingMessage) {
   return new Promise<any>((resolve, reject) => {
     let raw = '';
@@ -429,28 +445,39 @@ function imgProxyPlugin(): Plugin {
 }
 
 // 随 dev server 自动拉起 h2 中继(见 scripts/llm-relay.mjs;端口被占说明已有实例,会自动退出)
-function llmRelay(): Plugin {
+function llmRelay(options: { host: string; port: number }): Plugin {
   return {
     name: 'llm-relay',
     configureServer() {
-      const child = spawn(process.execPath, ['scripts/llm-relay.mjs'], { stdio: 'inherit' })
+      const child = spawn(process.execPath, ['scripts/llm-relay.mjs'], {
+        stdio: 'inherit',
+        env: {
+          ...process.env,
+          LLM_RELAY_HOST: options.host,
+          LLM_RELAY_PORT: String(options.port),
+        },
+      })
       process.on('exit', () => child.kill())
     },
   }
 }
 
 // https://vite.dev/config/
-export default defineConfig({
-  plugins: [react(), llmRelay(), ttsProxyPlugin(), imgProxyPlugin()],
-  server: {
-    // OminiGate 不允许浏览器跨域直连,且只在 HTTP/2 上流式;
-    // 浏览器 → Vite(/llm-proxy) → 本地中继(:8788, h2) → 网关
-    proxy: {
-      '/llm-proxy': {
-        target: 'http://127.0.0.1:8788',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/llm-proxy/, ''),
+export default defineConfig(({ mode }) => {
+  const relay = resolveLlmRelay(mode);
+
+  return {
+    plugins: [react(), llmRelay(relay), ttsProxyPlugin(), imgProxyPlugin()],
+    server: {
+      // OminiGate 不允许浏览器跨域直连,且只在 HTTP/2 上流式;
+      // 浏览器 → Vite(/llm-proxy) → 本地中继 → 网关
+      proxy: {
+        '/llm-proxy': {
+          target: `http://${relay.host}:${relay.port}`,
+          changeOrigin: true,
+          rewrite: (p) => p.replace(/^\/llm-proxy/, ''),
+        },
       },
     },
-  },
+  };
 })

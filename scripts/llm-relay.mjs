@@ -5,7 +5,16 @@ import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 
 const TARGET = 'https://api.ominigate.ai';
-const PORT = 8788;
+const DEFAULT_PORT = 18788;
+const HOST = process.env.LLM_RELAY_HOST || '127.0.0.1';
+const PORT = Number.parseInt(
+  process.env.LLM_RELAY_PORT || process.env.VITE_LLM_RELAY_PORT || String(DEFAULT_PORT),
+  10,
+);
+
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  throw new Error(`Invalid LLM relay port: ${process.env.LLM_RELAY_PORT || process.env.VITE_LLM_RELAY_PORT}`);
+}
 
 const server = createServer((req, res) => {
   const chunks = [];
@@ -28,7 +37,19 @@ const server = createServer((req, res) => {
     // -i 让 curl 先吐上游的状态行+响应头,解析完再原样流转 body
     let headerBuf = Buffer.alloc(0);
     let headersDone = false;
+    const canWrite = () => !res.destroyed && !res.writableEnded;
+    const sendJsonError = (status, message) => {
+      if (!canWrite()) return;
+      if (!res.headersSent) {
+        res.writeHead(status, { 'content-type': 'application/json' });
+      }
+      res.end(JSON.stringify({ error: { message } }));
+    };
     curl.stdout.on('data', (chunk) => {
+      if (!canWrite()) {
+        curl.kill();
+        return;
+      }
       if (headersDone) {
         res.write(chunk);
         return;
@@ -40,20 +61,22 @@ const server = createServer((req, res) => {
       const rest = headerBuf.subarray(sep + 4);
       const status = Number(head.match(/^HTTP\/[\d.]+ (\d+)/)?.[1] ?? 200);
       const ctype = head.match(/^content-type:\s*(.+)$/im)?.[1]?.trim() ?? 'application/json';
-      res.writeHead(status, { 'content-type': ctype, 'cache-control': 'no-cache' });
+      if (!res.headersSent) {
+        res.writeHead(status, { 'content-type': ctype, 'cache-control': 'no-cache' });
+      }
       if (rest.length) res.write(rest);
       headersDone = true;
     });
     curl.on('close', (code) => {
-      if (!headersDone) {
-        res.writeHead(502, { 'content-type': 'application/json' });
-        res.write(JSON.stringify({ error: { message: `relay: curl exit ${code}` } }));
+      if (!canWrite()) return;
+      if (!headersDone && !res.headersSent) {
+        sendJsonError(502, `relay: curl exit ${code}`);
+        return;
       }
       res.end();
     });
     curl.on('error', (e) => {
-      if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: { message: `relay: ${e.message}` } }));
+      sendJsonError(502, `relay: ${e.message}`);
     });
     // 客户端中途断开时终止上游(res 'close' 在响应结束后也会触发,那时 curl 已退出,kill 是无害空操作)
     res.on('close', () => curl.kill());
@@ -65,6 +88,10 @@ server.on('error', (e) => {
     console.log('[llm-relay] 已有实例在跑,本进程退出');
     process.exit(0);
   }
+  if (e.code === 'EACCES') {
+    console.error(`[llm-relay] 无法监听 ${HOST}:${PORT}。请换一个端口,例如在 .env 中设置 LLM_RELAY_PORT=18789`);
+    process.exit(1);
+  }
   throw e;
 });
-server.listen(PORT, '127.0.0.1', () => console.log(`[llm-relay] curl 传输中继就绪 :${PORT} → ${TARGET}`));
+server.listen(PORT, HOST, () => console.log(`[llm-relay] curl 传输中继就绪 ${HOST}:${PORT} → ${TARGET}`));
