@@ -10,6 +10,10 @@ export interface RandomCaseGenerationInput {
   difficulty: CaseDifficulty;
   /** 科室限定;不传或"随机"= 代码从科室池抽签 */
   dept?: string;
+  /** 主诉方向限定;不传 = 代码从该科方向池抽签(鉴别接诊模式传入,与假病例共用抽签结果) */
+  direction?: string;
+  /** 额外硬约束,逐字附加到出题提示词末尾(鉴别接诊模式用) */
+  extraDirective?: string;
 }
 
 // 科室池:每科附"主诉方向池",生成前由代码抽签正向注入,治多样性收敛(否则总出腹痛)
@@ -112,6 +116,19 @@ function normalizeGeneratedCase(value: unknown): unknown {
     if (item.mask === '') delete item.mask;
   }
 
+  // 触诊类查体的 3d 场景兜底:模型常漏 zone/onBed,漏了会导致开单后既不上床也没有按压交互
+  const exams = card.exams as unknown[];
+  if (!exams.some((e) => isRecord(e) && e.zone === 'abdomen')) {
+    const palp = exams.find(
+      (e) =>
+        isRecord(e) &&
+        typeof e.label === 'string' &&
+        (/触诊|按压/.test(e.label) || (/腹/.test(e.label) && /查体|体格|压痛/.test(e.label)))
+    );
+    if (palp && isRecord(palp)) palp.zone = 'abdomen';
+  }
+  for (const e of exams) if (isRecord(e) && e.zone === 'abdomen') e.onBed = true;
+
   return card;
 }
 
@@ -119,7 +136,7 @@ function buildUserPrompt(input: CaseGenerationInput): string {
   if (input.mode === 'random') {
     // 代码抽签定方向,LLM 命题作文:科室和主诉方向是硬约束,压制范例锚定导致的收敛
     const dept = input.dept && DEPT_DIRECTIONS[input.dept] ? input.dept : pick(CASE_DEPARTMENTS);
-    const direction = pick(DEPT_DIRECTIONS[dept]);
+    const direction = input.direction ?? pick(DEPT_DIRECTIONS[dept]);
     // 主任难度 15% 概率:非典型表现(真病灶伪装成别科症状,经典漏诊陷阱)
     const atypical = input.difficulty === 'challenge' && Math.random() < 0.15;
     return `请生成一个急诊教学病例。
@@ -135,7 +152,7 @@ function buildUserPrompt(input: CaseGenerationInput): string {
         ? '\n- 特别要求(非典型表现):真实病灶属于本科,但主诉表现得像其他系统的病(如下壁心梗表现为上腹痛),并在 rubric 中加入"识破非典型表现"的评分项'
         : ''
     }
-难度要求:${DIFFICULTY_PROMPTS[input.difficulty]}`;
+难度要求:${DIFFICULTY_PROMPTS[input.difficulty]}${input.extraDirective ? `\n${input.extraDirective}` : ''}`;
   }
 
   return `请基于以下玩家自定义基础信息生成一个完整急诊教学病例。

@@ -16,6 +16,16 @@ import { generateCase, CASE_DEPARTMENTS, type CaseDifficulty } from './agents/ca
 import { summarizeCaseIntake } from './game/caseSchema';
 import { PatientStage, type StageZones } from './components/PatientStage';
 import { PatientStage3D } from './components/PatientStage3D';
+import { generateFakeCase, IDENT_DEPARTMENTS, IDENT_DEPT_DIRECTIONS } from './agents/fakeCaseAgent';
+import {
+  evaluateIdentification,
+  judgeFakerProgress,
+  recordVerdict,
+  FAKER_MAX_TURNS,
+  type IdentEnding,
+  type IdentReview,
+} from './game/deception';
+import { VerdictDialog, IdentEndPanel } from './components/IdentPanels';
 import { bgm, sfx } from './sound';
 import { cancelModelSpeech, modelSpeechEnabled, speakPatientSentence, waitForModelSpeechIdle } from './voice/modelSpeech';
 
@@ -60,7 +70,12 @@ const QUICK_ASKS: Record<string, string[]> = {
   anaphylaxis_01: ['这之前吃过什么东西吗?', '身上有没有哪里发痒?', '以前有过敏史吗?'],
 };
 
-type StartMode = 'builtin' | 'generated' | 'custom';
+type StartMode = 'builtin' | 'generated' | 'custom' | 'ident';
+
+// 鉴别接诊模式:真病人的两条约束——表演腔不能当判据(防"演得凶=假"),
+// 检查要有窗口期(防"一张化验单定生死":首诊指标临界模糊,病程推进才明确)
+const IDENT_REAL_DIRECTIVE = `- 患者人设特别要求(鉴别接诊模式):这名患者确实有病,但性格上要焦虑放大、表现夸张、反复强调自己撑不住了,部分病史细节说不清——表演腔和说不清细节都不能成为判定诈病的依据,只有客观证据才可以。
+- 检查窗口期要求(鉴别接诊模式):优先选择早期客观指标可正常或临界的急症表现。exams/labs 的静态 result 一律按"就诊初期"来写:给临界值、可疑值、"未见明显异常但不能除外"的表述,不给一锤定音的铁证,note 里可建议动态复查;运行时报告会随病情进展自动加重,确诊证据应该是复查和病程演化的产物。hiddenExam/hiddenLab 线索的 desc 同样克制,写"可疑发现"而非确诊铁证。`;
 
 const CASE_DIFFICULTIES: { key: CaseDifficulty; label: string; desc: string }[] = [
   { key: 'basic', label: '基础', desc: '线索直接、恶化慢、干扰项少,适合练习标准流程。' },
@@ -115,6 +130,14 @@ export default function App() {
   const [caseErrors, setCaseErrors] = useState<string[]>([]);
   const [chips, setChips] = useState<string[]>([]);
   const chipSeqRef = useRef(0);
+  // ===== 鉴别接诊模式(真假病人识别)=====
+  const [identMode, setIdentMode] = useState(false);
+  const [identDept, setIdentDept] = useState('随机'); // 鉴别模式科室限定,"随机"= 代码抽签
+  const [generatingIdent, setGeneratingIdent] = useState(false);
+  const [verdictOpen, setVerdictOpen] = useState(false);
+  const [identEnded, setIdentEnded] = useState<IdentEnding | null>(null);
+  const [identReview, setIdentReview] = useState<IdentReview | null>(null);
+  const judgedTurnRef = useRef(1); // 装病者"得逞/放弃"裁决每回合只跑一次
 
   const gameRef = useRef<GameState | null>(null);
   gameRef.current = game;
@@ -238,6 +261,12 @@ export default function App() {
     setDoctorAt('desk');
     setGuidePalpate(false);
     setEvalResult(null);
+    // 鉴别模式随病例卡自动开关:带 deception 字段的卡即鉴别局(真假都带,只是 isFake 不同)
+    setIdentMode(!!card.deception);
+    setVerdictOpen(false);
+    setIdentEnded(null);
+    setIdentReview(null);
+    judgedTurnRef.current = 1;
     historyRef.current = [];
     chipSeqRef.current++;
     setChips(QUICK_ASKS[card.caseId] ?? []); // 静态兜底,生成成功后被替换
@@ -308,6 +337,100 @@ export default function App() {
       setCaseErrors(result.errors);
     }
   };
+
+  // ===== 鉴别接诊:开局抽签 + 诊断书 + 装病者裁决 =====
+  // 抽签顺序:科室 → 主诉方向 → 真假硬币。真假两边拿同一科室同一主诉的命题作文,
+  // 主诉本身零信息量,堵死"凭主诉猜真假"。抽签全在代码里,任何 LLM 无权决定。
+  const runStartIdent = async () => {
+    if (generatingIdent) return;
+    setGeneratingIdent(true);
+    setCaseErrors([]);
+    setGenerationMessage('');
+    const draw = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
+    const dept =
+      identDept !== '随机' && IDENT_DEPT_DIRECTIONS[identDept] ? identDept : draw(IDENT_DEPARTMENTS);
+    const direction = draw(IDENT_DEPT_DIRECTIONS[dept]);
+    const drawFake = Math.random() < 0.5;
+    const result = drawFake
+      ? await generateFakeCase({ dept, direction }, setGenerationMessage)
+      : await generateCase(
+          { mode: 'random', difficulty: 'advanced', dept, direction, extraDirective: IDENT_REAL_DIRECTIVE },
+          setGenerationMessage
+        );
+    setGeneratingIdent(false);
+    setGenerationMessage('');
+    if (result.ok) {
+      const card = result.card;
+      if (!card.deception) card.deception = { isFake: false };
+      await startGame(card);
+    } else {
+      console.warn('[ident] 生成失败:', result.errors);
+      setCaseErrors(['本次接诊准备失败,请重试。']); // 不展示原始错误,防止错误文案泄露真假
+    }
+  };
+
+  // 签发诊断书:收治 = 记录立场继续救治(可反悔);揭穿 = 终局判定,不可撤回
+  const signVerdict = async (call: 'admit' | 'expose') => {
+    const g = gameRef.current;
+    if (!g || !identMode || ended || identEnded) return;
+    setVerdictOpen(false);
+    const s2 = recordVerdict(g, call);
+    setGame(s2);
+    if (call === 'admit') {
+      pushMsg('nurse', '🧑‍⚕️ 护士:收治单已签,已办理入院,继续救治。');
+      return;
+    }
+    const isFake = !!csRef.current.deception?.isFake;
+    const tells = g.revealed.length;
+    await streamPatient(
+      {
+        kind: 'op_result',
+        recentEvents: [
+          isFake
+            ? `医生当面出示 ${tells} 条疑点,签发"诈病"判定,终止接诊——你被识破了,按你的心理侧写反应(崩溃/耍赖/认栽)`
+            : '医生认定你在装病,签发"诈病"判定,拒绝继续诊治——可你是真的病着,你感到冤屈和恐惧',
+        ],
+      },
+      s2
+    );
+    if (isFake) sfx.cure();
+    setIdentEnded(isFake ? 'exposed' : 'wrong_expose');
+  };
+
+  // 每回合开局裁决一次:装病者是否已得逞 / 演不下去(真病人和普通模式不走此路)
+  useEffect(() => {
+    if (!identMode || !game || ended || identEnded || streaming || transition) return;
+    if (!csRef.current.deception?.isFake) return;
+    if (game.turn <= 1 || judgedTurnRef.current >= game.turn) return;
+    judgedTurnRef.current = game.turn;
+    if (game.turn > FAKER_MAX_TURNS) {
+      setIdentEnded('gave_up');
+      return;
+    }
+    let cancelled = false;
+    void judgeFakerProgress(csRef.current, game).then((r) => {
+      if (cancelled || !r) return;
+      if (r.achieved) setIdentEnded('duped_exit');
+      else if (r.givingUp) setIdentEnded('gave_up');
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [identMode, game, ended, identEnded, streaming, transition]);
+
+  // 鉴别终局 → 复盘(一局只调一次)
+  useEffect(() => {
+    if (!identEnded || identReview) return;
+    const g = gameRef.current;
+    if (!g) return;
+    let cancelled = false;
+    void evaluateIdentification(csRef.current, g, identEnded).then((r) => {
+      if (!cancelled) setIdentReview(r);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [identEnded, identReview]);
 
   // 执行一个已完全确定的操作(点击菜单 / 判定层解析结果都走这里)
   const doAction = async (action: PlayerAction, revealedAskKey?: string | null) => {
@@ -550,9 +673,9 @@ export default function App() {
     endingTurnRef.current = false;
   }, [streamPatient]);
 
-  // 终局判定 + 行动点耗尽自动结束回合
+  // 终局判定 + 行动点耗尽自动结束回合(鉴别模式终局后停摆)
   useEffect(() => {
-    if (!game || ended || streaming || transition) return;
+    if (!game || ended || identEnded || streaming || transition) return;
     if (game.phase === 'dead' || game.phase === 'cured') {
       const t = setTimeout(() => setEnded(game.phase as 'dead' | 'cured'), 800);
       return () => clearTimeout(t);
@@ -561,7 +684,7 @@ export default function App() {
       const t = setTimeout(() => void runEndTurn(false), 250);
       return () => clearTimeout(t);
     }
-  }, [game, ended, streaming, transition, runEndTurn]);
+  }, [game, ended, identEnded, streaming, transition, runEndTurn]);
 
   // 游戏结束 → 调用评估 Agent 复盘(一局只调一次)
   useEffect(() => {
@@ -616,7 +739,7 @@ export default function App() {
     );
 
   if (!game) {
-    const generatingAny = generatingCase || generatingCustomCase;
+    const generatingAny = generatingCase || generatingCustomCase || generatingIdent;
     return (
       <div className="start-screen">
         <h1>诊断模拟器</h1>
@@ -632,6 +755,9 @@ export default function App() {
             </button>
             <button className={`start-tab ${startMode === 'custom' ? 'on' : ''}`} onClick={() => setStartMode('custom')}>
               自定义患者
+            </button>
+            <button className={`start-tab ${startMode === 'ident' ? 'on' : ''}`} onClick={() => setStartMode('ident')}>
+              鉴别接诊
             </button>
           </div>
 
@@ -727,6 +853,37 @@ export default function App() {
                   </button>
                 </div>
               )}
+            </div>
+          )}
+
+          {startMode === 'ident' && (
+            <div className="case-builder">
+              <div className="group-label">对面可能是真急症,也可能是影帝——真假各半,开局抽签,谁都不知道。</div>
+              <div className="rule-hint">
+                本模式隐藏"病情 HP"数值:只能靠问诊矛盾、查体不符、化验结果和病程变化来判断真假。
+                随时可点患者信息栏的 📝 签发诊断书:「收治入院」继续救治,或「判定诈病」终止接诊。
+                把真病人赶出去是重大事故;被影帝骗到最后,也自有代价。
+              </div>
+              <div className="group-label">科室(选"随机"则由系统抽签;真假都会顶着该科的主诉出现)</div>
+              <div className="chips">
+                {['随机', ...IDENT_DEPARTMENTS].map((d) => (
+                  <button
+                    key={d}
+                    className={`chip ${identDept === d ? 'on' : ''}`}
+                    disabled={generatingAny}
+                    onClick={() => setIdentDept(d)}
+                  >
+                    {d}
+                  </button>
+                ))}
+              </div>
+              <button
+                className="primary start-action"
+                disabled={!llmEnabled || generatingAny}
+                onClick={() => void runStartIdent()}
+              >
+                {generatingIdent ? generationMessage || '接诊准备中...' : llmEnabled ? '开始接诊' : '需要配置 LLM key'}
+              </button>
             </div>
           )}
 
@@ -968,7 +1125,12 @@ export default function App() {
               </div>
               <div className={`patient-phase phase-${game.phase}`}>{PHASE_LABEL[game.phase]}</div>
             </div>
-            <div className="patient-tools">
+<div className="patient-tools">
+              {identMode && !ended && !identEnded && (
+                <button className="mute-btn" title="签发诊断书:收治入院 / 判定诈病" onClick={() => setVerdictOpen(true)}>
+                  📝
+                </button>
+              )}
               <button className="mute-btn" title="2D/3D 渲染切换" onClick={() => setUse3d((v) => !v)}>
                 {use3d ? '🧊 3D' : '🎨 2D'}
               </button>
@@ -1052,16 +1214,19 @@ export default function App() {
               <small>%</small>
             </div>
           </div>
-          <div className="hp-row">
-            <label>病情 HP</label>
-            <div className="hp-bar">
-              <div
-                className={`hp-fill ${hpPct <= 30 ? 'low' : hpPct <= 55 ? 'mid' : ''}`}
-                style={{ width: `${hpPct}%` }}
-              />
+          {/* 鉴别模式隐藏上帝视角的 HP:真假只能靠证据判断(数值照常运转,仅不展示) */}
+          {!identMode && (
+            <div className="hp-row">
+              <label>病情 HP</label>
+              <div className="hp-bar">
+                <div
+                  className={`hp-fill ${hpPct <= 30 ? 'low' : hpPct <= 55 ? 'mid' : ''}`}
+                  style={{ width: `${hpPct}%` }}
+                />
+              </div>
+              <span className="hp-num">{game.hp}</span>
             </div>
-            <span className="hp-num">{game.hp}</span>
-          </div>
+          )}
           <div className="ap-row">
             <label>行动点</label>
             <span className="ap-dots">
@@ -1178,6 +1343,26 @@ export default function App() {
         </div>
       )}
 
+      {verdictOpen && !ended && !identEnded && (
+        <VerdictDialog
+          tells={game.revealed.length}
+          busy={busy}
+          onClose={() => setVerdictOpen(false)}
+          onAdmit={() => void signVerdict('admit')}
+          onExpose={() => void signVerdict('expose')}
+        />
+      )}
+
+      {identEnded && (
+        <IdentEndPanel
+          ending={identEnded}
+          card={cs}
+          game={game}
+          review={identReview}
+          onBack={() => setGame(null)}
+        />
+      )}
+
       {ended && (
         <div className="overlay">
           <div className={`dialog end ${ended}`}>
@@ -1267,6 +1452,8 @@ export default function App() {
     </div>
   );
 }
+
+
 
 
 
