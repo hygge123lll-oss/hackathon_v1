@@ -1,4 +1,4 @@
-// 音效 —— 全部用 Web Audio 现场合成,零素材依赖。
+﻿// 音效 —— 全部用 Web Audio 现场合成,零素材依赖。
 class Sfx {
   muted = false;
   private ctx: AudioContext | null = null;
@@ -89,3 +89,51 @@ class Sfx {
 }
 
 export const sfx = new Sfx();
+// 背景音乐:独立于语音/音效的开关,按病情阶段切换曲目。
+type BgmMode = 'normal' | 'critical';
+
+class Bgm {
+  muted = false;
+  private current: HTMLAudioElement | null = null;
+  private mode: BgmMode | null = null;
+  private readonly tracks: Record<BgmMode, string> = {
+    normal: '/audio/daily-vlog.mp3',
+    critical: '/audio/morning-steps.mp3',
+  };
+
+  unlock() {
+    if (!this.current) return;
+    void this.current.play().catch(() => undefined);
+  }
+
+  play(mode: BgmMode) {
+    if (this.muted) {
+      this.stop();
+      return;
+    }
+    if (this.mode === mode && this.current && !this.current.paused) return;
+    const previous = this.current;
+    this.mode = mode;
+    const audio = new Audio(this.tracks[mode]);
+    audio.loop = true;
+    audio.volume = mode === 'critical' ? 0.18 : 0.12;
+    this.current = audio;
+    void audio.play().catch(() => undefined);
+    if (previous) {
+      previous.pause();
+      previous.src = '';
+    }
+  }
+
+  stop() {
+    if (this.current) {
+      this.current.pause();
+      this.current.src = '';
+      this.current = null;
+    }
+    this.mode = null;
+  }
+}
+
+export const bgm = new Bgm();
+

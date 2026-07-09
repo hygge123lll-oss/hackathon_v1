@@ -1,4 +1,4 @@
-import { Component, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+﻿import { Component, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import './App.css';
 import { BUILTIN_CASES } from './game/cases';
 import { applyAction, createInitialState, endTurn, recordExpertCall } from './game/engine';
@@ -16,7 +16,8 @@ import { generateCase, CASE_DEPARTMENTS, type CaseDifficulty } from './agents/ca
 import { summarizeCaseIntake } from './game/caseSchema';
 import { PatientStage, type StageZones } from './components/PatientStage';
 import { PatientStage3D } from './components/PatientStage3D';
-import { sfx } from './sound';
+import { bgm, sfx } from './sound';
+import { cancelModelSpeech, modelSpeechEnabled, speakPatientSentence, waitForModelSpeechIdle } from './voice/modelSpeech';
 
 const CASES = BUILTIN_CASES;
 
@@ -96,6 +97,7 @@ export default function App() {
   const [flashCard, setFlashCard] = useState<string | null>(null);
   const [evalResult, setEvalResult] = useState<Evaluation | null>(null);
   const [muted, setMuted] = useState(false);
+  const [musicOn, setMusicOn] = useState(true);
   const [use3d, setUse3d] = useState(false); // 渲染层开关:默认 2D(比赛版),3D 实验版可切
   const [startMode, setStartMode] = useState<StartMode>('builtin');
   const [genDifficulty, setGenDifficulty] = useState<CaseDifficulty>('advanced');
@@ -123,13 +125,27 @@ export default function App() {
   const prevPhaseRef = useRef<string>('active');
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const locRef = useRef<'stool' | 'bed'>('stool');
+  const endingTurnRef = useRef(false);
 
   useEffect(() => {
     sfx.muted = muted;
-    if (muted) sfx.alarmOff();
+    if (muted) {
+      sfx.alarmOff();
+      cancelModelSpeech();
+    }
     else if (gameRef.current?.phase === 'critical') sfx.alarmOn();
   }, [muted]);
 
+
+  useEffect(() => {
+    bgm.muted = !musicOn;
+    if (!musicOn || !game || ended || game.phase === 'dead' || game.phase === 'cured') {
+      bgm.stop();
+      return;
+    }
+    const redHp = game.hp / game.hpMax <= 0.3;
+    bgm.play(game.phase === 'critical' || redHp ? 'critical' : 'normal');
+  }, [musicOn, game?.phase, game?.hp, game?.hpMax, ended]);
   useEffect(() => {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages, drawer]);
@@ -180,6 +196,7 @@ export default function App() {
       historyRef.current.push({ role: 'patient', text: full });
       setMessages((m) => m.map((msg) => (msg.id === id ? { ...msg, done: true } : msg)));
       setStreaming(false);
+      if (!muted && modelSpeechEnabled()) speakPatientSentence(full, csRef.current.patient, { state: stateForReply });
       refreshChips(gameRef.current ?? stateForReply);
     },
     [refreshChips]
@@ -202,7 +219,9 @@ export default function App() {
 
   const startGame = async (card: CaseCard) => {
     sfx.unlock();
+    bgm.unlock();
     sfx.alarmOff();
+    cancelModelSpeech();
     csRef.current = card;
     setCs(card);
     const s = createInitialState(card);
@@ -294,7 +313,8 @@ export default function App() {
   const doAction = async (action: PlayerAction, revealedAskKey?: string | null) => {
     const g = gameRef.current;
     if (!g || g.apLeft < AP_COST[action.type]) return;
-    if (transition || ended) return; // 防重入:回合转场/终局期间不接受任何操作
+    if (transition || ended) return;
+    cancelModelSpeech(); // 防重入:回合转场/终局期间不接受任何操作
 
     // 检查/化验:报告按患者当下状态由 LLM 现场生成(失败回落病例卡静态基准单)
     let resultOverride: GeneratedResult | undefined;
@@ -361,6 +381,7 @@ export default function App() {
 
   // 显式医嘱:让病人上床/回凳子(不耗行动点,服从性由患者 LLM 演)
   const orderMove = async (target: 'bed' | 'stool') => {
+    cancelModelSpeech();
     const g = gameRef.current;
     if (!g) return;
     const bedBoundNow = g.phase !== 'active' || g.hp < 50;
@@ -387,6 +408,7 @@ export default function App() {
 
   // 开触诊类检查单 → 不直接出报告:病人躺好、腹部高亮,等医生亲手按压
   const startGuidedPalpation = async () => {
+    cancelModelSpeech();
     const def = csRef.current.exams.find((e) => e.zone === 'abdomen');
     if (!def) return;
     setPopup(null);
@@ -400,6 +422,7 @@ export default function App() {
 
   // 自由文本入口:问诊 or 任意医嘱 → 判定层解析 → 分发
   const doCommand = async (text: string, panel: PanelHint = null) => {
+    cancelModelSpeech();
     const g = gameRef.current;
     if (!g || busy || g.apLeft < 1) return;
     pushMsg('doctor', text);
@@ -474,6 +497,7 @@ export default function App() {
   };
 
   const callExpert = async () => {
+    cancelModelSpeech();
     const g = gameRef.current;
     if (!g || busy || g.expertCallsLeft <= 0) return;
     sfx.expert();
@@ -488,9 +512,16 @@ export default function App() {
     setStreaming(false);
   };
 
-  const runEndTurn = useCallback(async () => {
+  const runEndTurn = useCallback(async (skipSpeech = false) => {
+    if (endingTurnRef.current) {
+      if (skipSpeech) cancelModelSpeech();
+      return;
+    }
     const g = gameRef.current;
     if (!g) return;
+    endingTurnRef.current = true;
+    if (skipSpeech) cancelModelSpeech();
+    else await waitForModelSpeechIdle();
     sfx.turn();
     setGuidePalpate(false);
     setTempBed(false);
@@ -501,7 +532,10 @@ export default function App() {
     setGame(state);
     processEvents(events);
     setTransition(false);
-    if (state.phase === 'dead' || state.phase === 'cured') return; // 终局由 effect 统一弹出
+    if (state.phase === 'dead' || state.phase === 'cured') {
+      endingTurnRef.current = false;
+      return;
+    } // 终局由 effect 统一弹出
     // 把本回合发生的事喂给患者,让回合末反应与操作强相关(也防复读)
     const recentEvents = state.timeline
       .filter((t) => t.turn === g.turn && t.detail !== '回合结束')
@@ -513,6 +547,7 @@ export default function App() {
     }
     recentEvents.push(`身体状态 ${g.hp}→${state.hp}(${state.hp < g.hp ? '在恶化' : '在好转'})`);
     await streamPatient({ kind: 'turn_end', recentEvents }, state);
+    endingTurnRef.current = false;
   }, [streamPatient]);
 
   // 终局判定 + 行动点耗尽自动结束回合
@@ -523,7 +558,7 @@ export default function App() {
       return () => clearTimeout(t);
     }
     if (game.apLeft === 0) {
-      const t = setTimeout(() => void runEndTurn(), 900);
+      const t = setTimeout(() => void runEndTurn(false), 250);
       return () => clearTimeout(t);
     }
   }, [game, ended, streaming, transition, runEndTurn]);
@@ -741,7 +776,7 @@ export default function App() {
     onSurgery: () => openPop('surgery'),
     onClock: () => {
       setPopup(null);
-      void runEndTurn();
+      void runEndTurn(true);
     },
     onPhone: () => {
       setPopup(null);
@@ -933,12 +968,17 @@ export default function App() {
               </div>
               <div className={`patient-phase phase-${game.phase}`}>{PHASE_LABEL[game.phase]}</div>
             </div>
-            <button className="mute-btn" title="2D/3D 渲染切换" onClick={() => setUse3d((v) => !v)}>
-              {use3d ? '🧊 3D' : '🎨 2D'}
-            </button>
-            <button className="mute-btn" title="静音开关" onClick={() => setMuted((m) => !m)}>
-              {muted ? '🔇' : '🔊'}
-            </button>
+            <div className="patient-tools">
+              <button className="mute-btn" title="2D/3D 渲染切换" onClick={() => setUse3d((v) => !v)}>
+                {use3d ? '🧊 3D' : '🎨 2D'}
+              </button>
+              <button className={`mute-btn ${musicOn ? 'music-on' : ''}`} title="音乐开关" onClick={() => setMusicOn((v) => !v)}>
+                {musicOn ? '🎵' : '🎵 OFF'}
+              </button>
+              <button className="mute-btn" title="静音开关" onClick={() => setMuted((m) => !m)}>
+                {muted ? '🔇' : '🔊'}
+              </button>
+            </div>
           </div>
           {use3d ? (
             <StageBoundary
@@ -1227,3 +1267,7 @@ export default function App() {
     </div>
   );
 }
+
+
+
+

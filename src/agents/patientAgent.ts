@@ -53,13 +53,20 @@ ${revealed.length ? `3. 已经告诉过医生的:${revealed.map((h) => h.desc).j
 4. 你完全不懂医学:体征(如反跳痛)、化验指标(如白细胞)你永远说不出来也不能确认,被问到就用自己的话表示不懂、让医生自己看。
 
 【禁止】主动说出任何疾病名称;一次交代全部症状;承认自己是AI或游戏角色;替医生做判断;**重复或近似重复你之前说过的话——每次开口必须有新的内容或新的表达**。
-【输出】只输出患者说的话,口语化,语气、用词、说不说方言完全由你的年龄和性格决定(不要千人一面的怯懦局促),1~3句,可以带一个括号内的简短动作神态。${
+【输出】只输出患者说的一句话。必须只有一句,不要第二句,不要分点,不要解释;可以带一个很短的括号内动作神态。口语化,语气、用词、说不说方言完全由年龄和性格决定。${
     ctx.kind === 'ask' && ctx.revealedKey
       ? `\n【本轮指令】医生的提问命中了解锁条件,你必须在回答中自然透露:「${c.hiddenAsk.find((h) => h.key === ctx.revealedKey)?.desc}」`
       : ''
   }`;
 }
 
+
+function keepOneSentence(text: string) {
+  const cleaned = text.replace(/\s+/g, ' ').trim();
+  if (!cleaned) return '';
+  const match = cleaned.match(/^(.{1,80}?[。！？!?]|.{1,42}(?:$|[，,、；;]))/);
+  return (match?.[1] || cleaned.slice(0, 42)).trim();
+}
 function buildUser(ctx: PatientCtx): string {
   switch (ctx.kind) {
     case 'greeting':
@@ -70,11 +77,11 @@ function buildUser(ctx: PatientCtx): string {
       const ev = ctx.recentEvents?.length
         ? `这段时间发生了:${ctx.recentEvents.join(';')}。(这些是幕后信息——你只能感知到发生在自己身上的部分,且不懂医学,不要说出数字、指标或术语,用身体感受表达)`
         : '';
-      return `(一段时间过去了,病情在变化)${ev}请结合刚发生的事和你当下的身体感受,自言自语或向医生嘟囔一句,不超过2句,禁止重复你之前说过的话。`;
+      return `(一段时间过去了,病情在变化)${ev}请结合刚发生的事和你当下的身体感受,只说一句话,禁止第二句,禁止重复你之前说过的话。`;
     }
     case 'op_result': {
       const ev = ctx.recentEvents?.length ? `刚发生的事:${ctx.recentEvents.join(';')}。` : '';
-      return `(医生刚对你做了一次处置)${ev}(这些是幕后信息,你不懂医学,只按它对你身体的实际影响来反应——好转就表达缓解,受了创伤就表达痛苦,两者都有就都体现,情绪由你自己判断)说1~2句真实反应,不要说数字和术语,不要重复之前说过的话。`;
+      return `(医生刚对你做了一次处置)${ev}(这些是幕后信息,你不懂医学,只按它对你身体的实际影响来反应——好转就表达缓解,受了创伤就表达痛苦,两者都有就都体现,情绪由你自己判断)只说一句真实反应,不要说第二句,不要说数字和术语,不要重复之前说过的话。`;
     }
   }
 }
@@ -102,18 +109,21 @@ export async function streamPatientReply(
         ),
         { role: 'user', content: buildUser(ctx) },
       ];
-      let got = false;
+      let full = '';
       await patientLLM.chatStream(messages, (d) => {
-        got = true;
-        onDelta(d);
+        full += d;
       });
-      if (got) return 'llm';
+      const one = keepOneSentence(full);
+      if (one) {
+        onDelta(one);
+        return 'llm';
+      }
     } catch (e) {
       console.warn('[patientAgent] LLM 失败,回落 Mock:', e);
     }
   }
   // Mock 兜底:整段文本逐字回吐
-  const text = mockPatientReply(c, s, ctx);
+  const text = keepOneSentence(mockPatientReply(c, s, ctx));
   for (const ch of text) {
     onDelta(ch);
     await new Promise((r) => setTimeout(r, 30));

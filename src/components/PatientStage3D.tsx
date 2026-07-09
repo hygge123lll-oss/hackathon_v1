@@ -352,7 +352,6 @@ export function PatientStage3D({ card, game, bubble, loc, doctorAt, guide, zones
 
   const mood = moodOf(game);
   const bedSitting = loc === 'bed' && (game.phase === 'recovering' || game.phase === 'cured');
-  const painMasked = game.activeEffects.some((e) => e.mask === 'pain');
   const iv = game.activeEffects.some((e) => e.rateDelta > 0);
   const elderly = card.patient.age >= 45;
   const male = /男/.test(card.patient.gender);
