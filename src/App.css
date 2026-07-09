@@ -876,14 +876,19 @@
 .doorplate-anchor {
   --accent: var(--mint);
   position: absolute;
+  display: inline-flex;
   pointer-events: auto;
   transform: translate(-50%, -50%);
 }
+.doorplate-anchor.is-open { z-index: 20; }
 .doorplate-anchor.spot-builtin { left: 8.5%; top: 34%; --accent: var(--mint); }
 .doorplate-anchor.spot-generated { left: 50%; top: 35%; --accent: var(--sky); }
 .doorplate-anchor.spot-custom { left: 74.5%; top: 35%; --accent: var(--butter); }
 .doorplate-anchor.spot-ident { left: 22.5%; top: 56%; --accent: var(--rose); }
 .lobby-hotspot.door-label {
+  position: relative;
+  left: auto;
+  top: auto;
   width: auto;
   min-height: 0;
   display: inline-flex;
@@ -923,23 +928,27 @@
   font-weight: 1000;
 }
 .doorplate-detail {
+  --detail-x: -50%;
+  --detail-arrow-left: 50%;
   position: absolute;
   left: 50%;
   top: calc(100% + 10px);
   width: 245px;
   padding: 14px 14px 12px;
-  transform: translateX(-50%);
+  z-index: 2;
+  transform: translateX(var(--detail-x));
+  transform-origin: top center;
   border: 3px solid var(--line);
   border-radius: 16px;
   background: rgba(255, 250, 240, 0.96);
   box-shadow: 0 6px 0 var(--line), 0 18px 30px rgba(43, 30, 22, 0.22);
   backdrop-filter: blur(4px);
-  animation: pop-in 180ms cubic-bezier(0.5, 1.7, 0.4, 1);
+  animation: doorplate-detail-in 180ms cubic-bezier(0.5, 1.7, 0.4, 1);
 }
 .doorplate-detail::before {
   content: '';
   position: absolute;
-  left: 50%;
+  left: var(--detail-arrow-left);
   top: -11px;
   width: 18px;
   height: 18px;
@@ -948,6 +957,12 @@
   border-top: 3px solid var(--line);
   border-radius: 5px 0 0 0;
   background: rgba(255, 250, 240, 0.96);
+}
+@keyframes doorplate-detail-in {
+  from {
+    opacity: 0;
+    transform: translateX(var(--detail-x)) translateY(-8px) scale(0.96);
+  }
 }
 .doorplate-detail b {
   display: block;
@@ -997,9 +1012,18 @@
   font-weight: 1000;
 }
 .doorplate-enter:hover { transform: translateY(-2px); }
-.doorplate-anchor.spot-builtin .doorplate-detail { left: 70%; }
-.doorplate-anchor.spot-custom .doorplate-detail { left: 25%; }
-.doorplate-anchor.spot-ident .doorplate-detail { left: 65%; }
+.doorplate-anchor.spot-builtin .doorplate-detail,
+.doorplate-anchor.spot-ident .doorplate-detail {
+  left: 0;
+  --detail-x: 0;
+  --detail-arrow-left: 36px;
+}
+.doorplate-anchor.spot-custom .doorplate-detail {
+  left: auto;
+  right: 0;
+  --detail-x: 0;
+  --detail-arrow-left: calc(100% - 36px);
+}
 @media (max-width: 760px) {
   .doorplate-anchor.spot-builtin { left: 14%; top: 36%; }
   .doorplate-anchor.spot-generated { left: 52%; top: 39%; }
@@ -1009,6 +1033,11 @@
   .door-label-icon { width: 22px; height: 22px; font-size: 13px; }
   .door-label span:last-child { font-size: 11px; }
   .doorplate-detail { width: 210px; padding: 12px; }
+  .doorplate-anchor.spot-generated .doorplate-detail {
+    left: auto;
+    right: 50%;
+    --detail-x: 50%;
+  }
   .doorplate-detail b { font-size: 17px; }
   .doorplate-detail p { font-size: 11.5px; }
 }

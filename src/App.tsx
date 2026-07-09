@@ -1051,7 +1051,7 @@ export default function App() {
                   const ms = scoreStats.modes[l.key];
                   const open = doorplateOpen === l.key;
                   return (
-                    <div key={l.key} className={`doorplate-anchor spot-${l.key}`}>
+                    <div key={l.key} className={`doorplate-anchor spot-${l.key} ${open ? 'is-open' : ''}`}>
                       <button
                         type="button"
                         className={`lobby-hotspot door-label ${open ? 'on' : ''}`}
