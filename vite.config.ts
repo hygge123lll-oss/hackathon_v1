@@ -345,6 +345,89 @@ function ttsProxyPlugin(): Plugin {
   };
 }
 
+// 患者头像生图代理:浏览器 → /api/img/patient-portrait → PPIO seedream,密钥只在服务端
+function imgProxyPlugin(): Plugin {
+  let env: Record<string, string> = {};
+
+  async function handle(req: IncomingMessage, res: ServerResponse) {
+    if (req.method !== 'POST') {
+      res.statusCode = 405;
+      res.end('Method Not Allowed');
+      return;
+    }
+    try {
+      const body = await readJson(req);
+      const patient = (body.patient || {}) as PatientInfo & { personality?: string };
+      const age = Number(patient.age || 30);
+      const gender = String(patient.gender || '').includes('女') ? '女' : '男';
+      const personality = String(patient.personality || '').slice(0, 40);
+
+      const apiKey = env.PPIO_IMG_API_KEY || env.PPIO_TTS_API_KEY || env.PPIO_API_KEY || env.VITE_LLM_API_KEY;
+      const endpoint = env.PPIO_IMG_ENDPOINT || 'https://api.ppio.com/v3/seedream-5.0-lite';
+      if (!apiKey) {
+        res.statusCode = 500;
+        res.end('Missing PPIO_IMG_API_KEY or PPIO_TTS_API_KEY');
+        return;
+      }
+
+      // 只描述外观与"身体不适",绝不把疾病诊断写进提示词,防止画面泄底
+      const prompt = `儿童绘本卡通风格的半身人物头像:${age}岁${gender}性,性格特点:${personality || '普通人'}。因为身体不舒服来医院看病,表情略显不适但依然可爱。厚实的深棕色描边,扁平明快的色块,奶油色纯色背景,人物居中,不要文字,不要水印,不要写实风格`;
+
+      const upstream = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + apiKey,
+        },
+        body: JSON.stringify({
+          prompt,
+          size: env.PPIO_IMG_SIZE || '1920x1920', // 接口下限 368 万像素
+          watermark: false,
+        }),
+      });
+      if (!upstream.ok) {
+        res.statusCode = upstream.status;
+        res.end((await upstream.text()).slice(0, 500));
+        return;
+      }
+      const data = (await upstream.json()) as { images?: string[] };
+      const url = data.images?.[0];
+      if (!url || typeof url !== 'string') {
+        res.statusCode = 502;
+        res.end('Image API response missing url: ' + JSON.stringify(data).slice(0, 300));
+        return;
+      }
+      // 把签名 URL 的图在服务端取回转发,前端拿到的是稳定的字节流
+      const img = await fetch(url);
+      if (!img.ok) {
+        res.statusCode = 502;
+        res.end('Fetch generated image failed: ' + img.status);
+        return;
+      }
+      res.statusCode = 200;
+      res.setHeader('Content-Type', img.headers.get('content-type') || 'image/jpeg');
+      res.setHeader('Cache-Control', 'no-store');
+      res.end(Buffer.from(await img.arrayBuffer()));
+    } catch (error) {
+      res.statusCode = 500;
+      res.end(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  return {
+    name: 'patient-portrait-proxy',
+    configResolved(config) {
+      env = loadEnv(config.mode, process.cwd(), '');
+    },
+    configureServer(server) {
+      server.middlewares.use('/api/img/patient-portrait', handle);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use('/api/img/patient-portrait', handle);
+    },
+  };
+}
+
 // 随 dev server 自动拉起 h2 中继(见 scripts/llm-relay.mjs;端口被占说明已有实例,会自动退出)
 function llmRelay(): Plugin {
   return {
@@ -358,7 +441,7 @@ function llmRelay(): Plugin {
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), llmRelay(), ttsProxyPlugin()],
+  plugins: [react(), llmRelay(), ttsProxyPlugin(), imgProxyPlugin()],
   server: {
     // OminiGate 不允许浏览器跨域直连,且只在 HTTP/2 上流式;
     // 浏览器 → Vite(/llm-proxy) → 本地中继(:8788, h2) → 网关

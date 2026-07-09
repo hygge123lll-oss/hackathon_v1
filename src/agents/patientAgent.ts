@@ -80,8 +80,15 @@ ${revealed.length ? `3. 已经告诉过医生的:${revealed.map((h) => h.desc).j
 function keepOneSentence(text: string) {
   const cleaned = text.replace(/\s+/g, ' ').trim();
   if (!cleaned) return '';
-  const match = cleaned.match(/^(.{1,80}?[。！？!?]|.{1,42}(?:$|[，,、；;]))/);
-  return (match?.[1] || cleaned.slice(0, 42)).trim();
+  // 开头的(动作神态/说话人)括号不占台词预算,否则长括号会把正文挤到只剩半句
+  const lead = cleaned.match(/^[（(][^）)]{0,48}[）)]/)?.[0] ?? '';
+  const body = cleaned.slice(lead.length).trim();
+  // 优先取到第一个句号/问号/叹号;没有句尾但不超长就整句保留(结巴、省略号结尾都属于这种);
+  // 真超长才退而切在最后一个逗号处,最后兜底硬切
+  const first =
+    body.match(/^(.{1,80}?[。！？!?])/)?.[1] ??
+    (body.length <= 80 ? body : body.match(/^(.{1,72})[，,、；;]/)?.[1] ?? body.slice(0, 72));
+  return (lead + first).trim();
 }
 function buildUser(ctx: PatientCtx): string {
   switch (ctx.kind) {

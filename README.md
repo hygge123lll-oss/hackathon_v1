@@ -88,3 +88,7 @@ LLM_FALLBACK_API_KEY=
 - `.env` 已被 `.gitignore` 忽略，不会上传真实密钥。
 - 背景音乐资源位于 `public/audio/`。
 - 根目录如有原始音乐 mp3，仅用于本地备份，不是运行必需文件。
+
+## 音乐署名
+
+- 标题/菜单曲 `title-fluffing-a-duck.mp3`："Fluffing a Duck" — Kevin MacLeod (incompetech.com)，Licensed under Creative Commons: By Attribution 4.0（https://creativecommons.org/licenses/by/4.0/）。

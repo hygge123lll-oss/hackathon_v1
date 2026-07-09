@@ -1,4 +1,4 @@
-// 3D 诊室舞台(react-three-fiber)—— 与 PatientStage 同一套 props 接口,渲染层可切换。
+﻿// 3D 诊室舞台(react-three-fiber)—— 与 PatientStage 同一套 props 接口,渲染层可切换。
 // 人物:Quaternius CC0 骨骼动画角色(医生/老爷子/姑娘),坐诊/走位/躺床/挨按/治愈欢呼全是真动画。
 // 场景:Toon 三段色阶 + 描边 + 圆角几何 + 接触软阴影。逻辑零判定,交互回调全部转发回 App。
 import * as THREE from 'three';

@@ -27,7 +27,7 @@ import {
 } from './game/deception';
 import { VerdictDialog, IdentEndPanel } from './components/IdentPanels';
 import { bgm, sfx } from './sound';
-import { cancelModelSpeech, modelSpeechEnabled, speakPatientSentence, waitForModelSpeechIdle } from './voice/modelSpeech';
+import { cancelModelSpeech, modelSpeechEnabled, setModelSpeechVolume, speakPatientSentence, waitForModelSpeechIdle } from './voice/modelSpeech';
 
 const CASES = BUILTIN_CASES;
 
@@ -40,8 +40,45 @@ interface Msg {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// 常规游戏设置,持久化到 localStorage(旧的 master-volume 键自动并入)
+interface SavedSettings {
+  volume?: number;
+  musicOn?: boolean;
+  muted?: boolean;
+  voiceOn?: boolean;
+  use3d?: boolean;
+}
+const SETTINGS_KEY = 'game-settings';
+function loadSavedSettings(): SavedSettings {
+  try {
+    const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') as SavedSettings;
+    if (typeof s.volume !== 'number') {
+      const legacy = Number(localStorage.getItem('master-volume'));
+      if (Number.isFinite(legacy) && legacy >= 0 && legacy <= 1) s.volume = legacy;
+    }
+    return s;
+  } catch {
+    return {};
+  }
+}
+const savedSettings = loadSavedSettings();
+
 // 医生气泡在各锚位上方的横向位置
 const DOC_LEFT: Record<'desk' | 'bed' | 'phone', string> = { desk: '18%', bed: '46%', phone: '31%' };
+
+// 返回箭头:粗描边圆头,贴合卡通手绘风
+const BackIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+    <path
+      d="M19 12H6.5M11.5 5.5 5 12l6.5 6.5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="3.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
 
 // 3D 渲染崩溃时自动降级到 2D,不让玩家看到白/黄屏
 class StageBoundary extends Component<{ fallback: ReactNode; children: ReactNode }, { err: boolean }> {
@@ -83,53 +120,62 @@ const CASE_DIFFICULTIES: { key: CaseDifficulty; label: string; desc: string }[] 
   { key: 'challenge', label: '挑战', desc: '表现更隐蔽、恶化更快、错误处置代价更高。' },
 ];
 
+// 四种接诊模式做成医院任务点:空间名负责医院感,badge 负责说明玩法类型
+const LEVELS: { key: StartMode; icon: string; name: string; sub: string; badge: string; stars: number }[] = [
+  { key: 'builtin', icon: '📁', name: '病历档案室', sub: '经典病例,练习标准问诊、检查和处置流程。', badge: '经典病例', stars: 1 },
+  { key: 'generated', icon: '🔢', name: '分诊台', sub: '随机派发一位新患者,每次值班都有新状况。', badge: '随机病例', stars: 3 },
+  { key: 'custom', icon: '🧪', name: '特诊室', sub: '自定义患者信息和目标疾病,生成定制病例。', badge: '自定义接诊', stars: 2 },
+  { key: 'ident', icon: '👀', name: '候诊区筛查', sub: '识别真假病人,决定收治还是当场揭穿。', badge: '真假识别', stars: 5 },
+];
+
 let msgSeq = 0;
-interface ScoreStats {
+interface ModeStats {
   games: number;
   totalScore: number;
+  best: number;
+}
+interface ScoreStats {
+  games: number; // 全局累计(含分模式功能上线前的老存档)
+  totalScore: number;
+  modes: Record<StartMode, ModeStats>;
 }
 
 const SCORE_STATS_KEY = 'today-who-unwell-score-stats';
+const emptyModeStats = (): ModeStats => ({ games: 0, totalScore: 0, best: 0 });
+const emptyScoreStats = (): ScoreStats => ({
+  games: 0,
+  totalScore: 0,
+  modes: { builtin: emptyModeStats(), generated: emptyModeStats(), custom: emptyModeStats(), ident: emptyModeStats() },
+});
 
 function loadScoreStats(): ScoreStats {
-  if (typeof window === 'undefined') return { games: 0, totalScore: 0 };
+  if (typeof window === 'undefined') return emptyScoreStats();
   try {
     const raw = window.localStorage.getItem(SCORE_STATS_KEY);
-    if (!raw) return { games: 0, totalScore: 0 };
+    if (!raw) return emptyScoreStats();
     const parsed = JSON.parse(raw) as Partial<ScoreStats>;
-    return {
-      games: Math.max(0, Number(parsed.games) || 0),
-      totalScore: Math.max(0, Number(parsed.totalScore) || 0),
-    };
+    const base = emptyScoreStats();
+    base.games = Math.max(0, Number(parsed.games) || 0);
+    base.totalScore = Math.max(0, Number(parsed.totalScore) || 0);
+    for (const key of Object.keys(base.modes) as StartMode[]) {
+      const m = parsed.modes?.[key];
+      if (m) {
+        base.modes[key] = {
+          games: Math.max(0, Number(m.games) || 0),
+          totalScore: Math.max(0, Number(m.totalScore) || 0),
+          best: Math.max(0, Number(m.best) || 0),
+        };
+      }
+    }
+    return base;
   } catch {
-    return { games: 0, totalScore: 0 };
+    return emptyScoreStats();
   }
 }
 
 function saveScoreStats(stats: ScoreStats) {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(SCORE_STATS_KEY, JSON.stringify(stats));
-}
-
-function scoreToStars(score: number) {
-  return Math.max(0, Math.min(5, Math.round((score / 20) * 2) / 2));
-}
-
-function StarRating({ value }: { value: number }) {
-  return (
-    <div className="star-rating" aria-label={`${value.toFixed(1)} 星`}>
-      {[0, 1, 2, 3, 4].map((i) => {
-        const fill = Math.max(0, Math.min(1, value - i));
-        return (
-          <span key={i} className="star-wrap">
-            <span className="star-empty">★</span>
-            <span className="star-fill" style={{ width: `${fill * 100}%` }}>★</span>
-          </span>
-        );
-      })}
-      <b>{value.toFixed(1)}</b>
-    </div>
-  );
 }
 
 export default function App() {
@@ -158,12 +204,20 @@ export default function App() {
   } | null>(null);
   const [flashCard, setFlashCard] = useState<string | null>(null);
   const [evalResult, setEvalResult] = useState<Evaluation | null>(null);
-  const [muted, setMuted] = useState(false);
-  const [musicOn, setMusicOn] = useState(true);
+  const [muted, setMuted] = useState(savedSettings.muted ?? false);
+  const [musicOn, setMusicOn] = useState(savedSettings.musicOn ?? true);
+  const [voiceOn, setVoiceOn] = useState(savedSettings.voiceOn ?? true);
+  const [volume, setVolume] = useState(() => {
+    const v = savedSettings.volume;
+    return typeof v === 'number' && v >= 0 && v <= 1 ? v : 1;
+  });
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [quitConfirm, setQuitConfirm] = useState(false);
   const [startEntered, setStartEntered] = useState(false);
   const [scoreStats, setScoreStats] = useState<ScoreStats>(() => loadScoreStats());
-  const [use3d, setUse3d] = useState(false); // 渲染层开关:默认 2D(比赛版),3D 实验版可切
-  const [startMode, setStartMode] = useState<StartMode>('builtin');
+  const [use3d, setUse3d] = useState(savedSettings.use3d ?? false); // 渲染层开关:默认 2D(比赛版),3D 实验版可切
+  const [levelOpen, setLevelOpen] = useState<StartMode | null>(null); // 当前点进的关卡,null = 选关页
+  const [doorplateOpen, setDoorplateOpen] = useState<StartMode | null>(null); // 选关页当前展开说明的门牌
   const [genDifficulty, setGenDifficulty] = useState<CaseDifficulty>('advanced');
   const [genDept, setGenDept] = useState('随机'); // 科室限定,"随机"= 代码抽签
   const [generatingCase, setGeneratingCase] = useState(false);
@@ -199,6 +253,7 @@ export default function App() {
   const locRef = useRef<'stool' | 'bed'>('stool');
   const endingTurnRef = useRef(false);
   const scoreRecordedRef = useRef<string | null>(null);
+  const playModeRef = useRef<StartMode>('builtin'); // 本局属于哪个关卡,结算时分模式记账
 
   useEffect(() => {
     sfx.muted = muted;
@@ -209,6 +264,39 @@ export default function App() {
     else if (gameRef.current?.phase === 'critical') sfx.alarmOn();
   }, [muted]);
 
+  useEffect(() => {
+    sfx.setVolume(volume);
+    bgm.setVolume(volume);
+    setModelSpeechVolume(volume);
+  }, [volume]);
+
+  useEffect(() => {
+    if (!voiceOn) cancelModelSpeech();
+  }, [voiceOn]);
+
+  // 语音播报开关的实时值,供 streamPatient 等长生命周期回调读取
+  const speechOnRef = useRef(true);
+  speechOnRef.current = voiceOn && !muted;
+
+  useEffect(() => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ muted, musicOn, voiceOn, volume, use3d }));
+  }, [muted, musicOn, voiceOn, volume, use3d]);
+
+  // 浏览器不允许无交互自动出声:进页面先试播,失败则在首次任意点击/按键时立刻补播
+  useEffect(() => {
+    const wake = () => {
+      sfx.unlock();
+      bgm.unlock();
+      window.removeEventListener('pointerdown', wake);
+      window.removeEventListener('keydown', wake);
+    };
+    window.addEventListener('pointerdown', wake);
+    window.addEventListener('keydown', wake);
+    return () => {
+      window.removeEventListener('pointerdown', wake);
+      window.removeEventListener('keydown', wake);
+    };
+  }, []);
 
   useEffect(() => {
     bgm.muted = !musicOn;
@@ -277,7 +365,7 @@ export default function App() {
       historyRef.current.push({ role: 'patient', text: full });
       setMessages((m) => m.map((msg) => (msg.id === id ? { ...msg, done: true } : msg)));
       setStreaming(false);
-      if (!muted && modelSpeechEnabled()) speakPatientSentence(full, csRef.current.patient, { state: stateForReply });
+      if (speechOnRef.current && modelSpeechEnabled()) speakPatientSentence(full, csRef.current.patient, { state: stateForReply });
       refreshChips(gameRef.current ?? stateForReply);
     },
     [refreshChips]
@@ -298,7 +386,8 @@ export default function App() {
     }
   };
 
-  const startGame = async (card: CaseCard) => {
+  const startGame = async (card: CaseCard, mode: StartMode) => {
+    playModeRef.current = mode;
     scoreRecordedRef.current = null;
     sfx.unlock();
     bgm.unlock();
@@ -338,14 +427,14 @@ export default function App() {
 
   const busy = streaming || transition || !!ended;
 
-  const runGenerateCase = async () => {
+  const runGenerateCase = async (difficultyOverride?: CaseDifficulty) => {
     if (generatingCase) return;
     setGeneratingCase(true);
     setGenerationMessage('出题人正在编写病例...');
     setCaseErrors([]);
     setGeneratedCase(null);
     const result = await generateCase(
-      { mode: 'random', difficulty: genDifficulty, dept: genDept === '随机' ? undefined : genDept },
+      { mode: 'random', difficulty: difficultyOverride ?? genDifficulty, dept: genDept === '随机' ? undefined : genDept },
       setGenerationMessage
     );
     setGeneratingCase(false);
@@ -421,7 +510,7 @@ export default function App() {
     if (result.ok) {
       const card = result.card;
       if (!card.deception) card.deception = { isFake: false };
-      await startGame(card);
+      await startGame(card, 'ident');
     } else {
       console.warn('[ident] 生成失败:', result.errors);
       setCaseErrors(['本次接诊准备失败,请重试。']); // 不展示原始错误,防止错误文案泄露真假
@@ -759,17 +848,29 @@ export default function App() {
     };
   }, [ended, evalResult]);
 
+  const recordScore = (score: number) => {
+    const mode = playModeRef.current;
+    setScoreStats((prev) => {
+      const m = prev.modes[mode];
+      const next: ScoreStats = {
+        games: prev.games + 1,
+        totalScore: prev.totalScore + score,
+        modes: {
+          ...prev.modes,
+          [mode]: { games: m.games + 1, totalScore: m.totalScore + score, best: Math.max(m.best, score) },
+        },
+      };
+      saveScoreStats(next);
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (!ended || !evalResult) return;
     const key = `standard:${ended}:${evalResult.score}:${gameRef.current?.turn ?? 0}`;
     if (scoreRecordedRef.current === key) return;
     scoreRecordedRef.current = key;
-    setScoreStats((prev) => {
-      const next = { games: prev.games + 1, totalScore: prev.totalScore + evalResult.score };
-      saveScoreStats(next);
-      return next;
-    });
+    recordScore(evalResult.score);
   }, [ended, evalResult]);
 
   useEffect(() => {
@@ -777,11 +878,7 @@ export default function App() {
     const key = `ident:${identEnded}:${identReview.score}:${gameRef.current?.turn ?? 0}`;
     if (scoreRecordedRef.current === key) return;
     scoreRecordedRef.current = key;
-    setScoreStats((prev) => {
-      const next = { games: prev.games + 1, totalScore: prev.totalScore + identReview.score };
-      saveScoreStats(next);
-      return next;
-    });
+    recordScore(identReview.score);
   }, [identEnded, identReview]);
   // ===== 场景弹层的提交通道:提交即关弹层,后续反馈以场景气泡出现 =====
   const openPop = (p: 'talk' | 'orders' | 'cabinet' | 'surgery') => {
@@ -821,15 +918,78 @@ export default function App() {
       </div>
     );
 
+  // 退出看诊回主界面:掐掉没说完的语音和报警,不能只 setGame(null)
+  const exitToMenu = () => {
+    cancelModelSpeech();
+    sfx.alarmOff();
+    setQuitConfirm(false);
+    setGame(null);
+  };
+
+  // 游戏设置弹窗:主界面与看诊界面共用同一份状态和 UI
+  const settingsPanel = settingsOpen && (
+    <div className="settings-mask" onClick={() => setSettingsOpen(false)}>
+      <div className="settings-card" onClick={(e) => e.stopPropagation()}>
+        <div className="settings-head">
+          <b>游戏设置</b>
+          <button className="settings-close" onClick={() => setSettingsOpen(false)}>✕</button>
+        </div>
+        <label className="settings-row">
+          <span>主音量</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(volume * 100)}
+            onChange={(e) => setVolume(Number(e.target.value) / 100)}
+          />
+          <b className="settings-val">{Math.round(volume * 100)}%</b>
+        </label>
+        <label className="settings-row">
+          <span>背景音乐</span>
+          <input type="checkbox" checked={musicOn} onChange={(e) => setMusicOn(e.target.checked)} />
+        </label>
+        <label className="settings-row">
+          <span>音效与提示音</span>
+          <input type="checkbox" checked={!muted} onChange={(e) => setMuted(!e.target.checked)} />
+        </label>
+        <label className="settings-row">
+          <span>病人语音{modelSpeechEnabled() ? '' : '(需配置 TTS 密钥)'}</span>
+          <input
+            type="checkbox"
+            checked={voiceOn && modelSpeechEnabled()}
+            disabled={!modelSpeechEnabled()}
+            onChange={(e) => setVoiceOn(e.target.checked)}
+          />
+        </label>
+        <div className="settings-row">
+          <span>画面渲染</span>
+          <div className="settings-seg">
+            <button className={use3d ? '' : 'on'} onClick={() => setUse3d(false)}>🎨 2D</button>
+            <button className={use3d ? 'on' : ''} onClick={() => setUse3d(true)}>🧊 3D</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
   if (!game) {
     const generatingAny = generatingCase || generatingCustomCase || generatingIdent;
-    const avgScore = scoreStats.games > 0 ? scoreStats.totalScore / scoreStats.games : 0;
-    const avgStars = scoreToStars(avgScore);
+
+    // 标题屏与模式选择屏右上角的设置入口
+    const settingsChrome = (
+      <>
+        <button className="settings-gear" title="游戏设置" onClick={() => setSettingsOpen(true)}>
+          ⚙️
+        </button>
+        {settingsPanel}
+      </>
+    );
 
     if (!startEntered) {
       return (
         <div className="title-screen">
-          <div className="title-sunburst" aria-hidden="true" />
+          {settingsChrome}
           <div className="title-arc" aria-label="今天谁不舒服">
             {'今天谁不舒服'.split('').map((ch, i, arr) => {
               const mid = (arr.length - 1) / 2;
@@ -853,130 +1013,162 @@ export default function App() {
           <button className="title-start" onClick={() => { bgm.unlock(); bgm.play('menu'); setStartEntered(true); }}>
             开始游戏
           </button>
-          <div className="title-patients" aria-hidden="true">
-            <span className="toon-patient fever" />
-            <span className="toon-patient dizzy" />
-            <span className="toon-patient sniffle" />
-            <span className="toon-patient grumpy" />
-          </div>
         </div>
       );
     }
 
     return (
-      <div className="start-screen mode-screen">
-        <div className="mode-top-grid">
-          <section className="doctor-id-card">
-            <div className="id-pin" />
-            <div className="doctor-avatar" aria-hidden="true">
-              <div className="doctor-face">
-                <span className="doc-cap" />
-                <span className="doc-head" />
-                <span className="doc-hair" />
-                <span className="doc-body" />
+      <div className={`start-screen mode-screen ${!levelOpen ? 'lobby-screen' : ''}`}>
+        {settingsChrome}
+        <button
+          className="back-arrow"
+          title={levelOpen ? '返回选关' : '返回标题'}
+          onClick={() => (levelOpen ? setLevelOpen(null) : setStartEntered(false))}
+        >
+          <BackIcon />
+        </button>
+
+        {/* ===== 选关页:医院任务大厅 ===== */}
+        {!levelOpen && (
+          <>
+            <section className="hospital-lobby" aria-label="今日值班任务" onClick={() => setDoorplateOpen(null)}>
+              <div className="hospital-backdrop" aria-hidden="true">
+                <span className="wall-sign sign-left">WARD 2F</span>
+                <span className="wall-sign sign-right">NURSE CALL</span>
+                <span className="wall-clock" />
+                <span className="ceiling-light l1" />
+                <span className="ceiling-light l2" />
               </div>
-            </div>
-            <div className="id-copy">
-              <span>主治医生工卡</span>
-              <b>玩家医生</b>
-              <small>已接诊 {scoreStats.games} 局</small>
-            </div>
-            <div className="id-rating">
-              <StarRating value={avgStars} />
-              <small>{scoreStats.games ? `平均 ${Math.round(avgScore)} 分` : '完成一局后生成评级'}</small>
-            </div>
-          </section>
 
-          <section className="mode-title-card">
-            <button className="back-title" onClick={() => setStartEntered(false)}>返回标题</button>
-            <div className="mode-kicker">Today Who Feels Off?</div>
-            <h1>今天谁不舒服</h1>
-            <p>选择接诊方式，和 AI 患者自由对话、检查、开药、手术，别被隐藏患者骗过。</p>
-            <div className="start-badges">
-              <span className="start-badge">温馨卡通</span>
-              <span className="start-badge">AI 患者</span>
+              <div className="hospital-hud">
+                <span className="hud-pill">值班医生 · 玩家</span>
+                <span className="hud-pill">累计接诊 {scoreStats.games} 局</span>
+                <span className="hud-pill accent">平均评分 {scoreStats.games ? Math.round(scoreStats.totalScore / scoreStats.games) : 0}</span>
+              </div>
+
+              <div className="lobby-hotspots doorplate-hotspots" aria-label="医院任务点">
+                {LEVELS.map((l, idx) => {
+                  const ms = scoreStats.modes[l.key];
+                  const open = doorplateOpen === l.key;
+                  return (
+                    <div key={l.key} className={`doorplate-anchor spot-${l.key}`}>
+                      <button
+                        type="button"
+                        className={`lobby-hotspot door-label ${open ? 'on' : ''}`}
+                        style={{ '--pop-delay': `${idx * 80}ms` } as React.CSSProperties}
+                        aria-expanded={open}
+                        onClick={(e) => { e.stopPropagation(); setDoorplateOpen(open ? null : l.key); }}
+                      >
+                        <span className="door-label-icon" aria-hidden="true">{l.icon}</span>
+                        <span>{l.name}</span>
+                      </button>
+                      {open && (
+                        <section className={`doorplate-detail detail-${l.key}`} onClick={(e) => e.stopPropagation()}>
+                          <span className="doorplate-badge">{l.badge}</span>
+                          <b>{l.name}</b>
+                          <p>{l.sub}</p>
+                          <div className="doorplate-meta">
+                            <span title="推荐挑战强度">{'★'.repeat(l.stars) + '☆'.repeat(5 - l.stars)}</span>
+                            <small>{ms.games ? `已接诊 ${ms.games} 局 · 最佳 ${ms.best} 分` : '尚未挑战'}</small>
+                          </div>
+                          <button className="doorplate-enter" onClick={(e) => { e.stopPropagation(); setLevelOpen(l.key); }}>进入</button>
+                        </section>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="hospital-floor" aria-hidden="true">
+                <span className="floor-line" />
+                <span className="floor-cart" />
+              </div>
+            </section>
+          </>
+        )}
+
+        {/* ===== 关卡配置页:点进某一关后的准备内容 ===== */}
+        {levelOpen && (
+          <header className="level-head">
+            <span className="level-head-icon" aria-hidden="true">{LEVELS.find((l) => l.key === levelOpen)?.icon}</span>
+            <div className="level-head-copy">
+              <h1>{LEVELS.find((l) => l.key === levelOpen)?.name}</h1>
+              <p>{LEVELS.find((l) => l.key === levelOpen)?.sub}</p>
             </div>
-          </section>
-
-          <section className="patient-portraits">
-            <div className="portrait-title">今日候诊</div>
-            <div className="portrait-grid" aria-hidden="true">
-              <span className="mini-patient bandage" />
-              <span className="mini-patient nausea" />
-              <span className="mini-patient mask" />
-              <span className="mini-patient student" />
-              <span className="mini-patient elder" />
-              <span className="mini-patient mystery" />
-            </div>
-            <small>有人真病了，也有人没那么简单。</small>
-          </section>
-        </div>
-
-        <main className="mode-board">
-          <div className="start-tabs mode-tabs">
-            <button className={`start-tab ${startMode === 'builtin' ? 'on' : ''}`} onClick={() => setStartMode('builtin')}>
-              标准病例
-            </button>
-            <button className={`start-tab ${startMode === 'generated' ? 'on' : ''}`} onClick={() => setStartMode('generated')}>
-              随机患者
-            </button>
-            <button className={`start-tab ${startMode === 'custom' ? 'on' : ''}`} onClick={() => setStartMode('custom')}>
-              自定义患者
-            </button>
-            <button className={`start-tab ${startMode === 'ident' ? 'on' : ''}`} onClick={() => setStartMode('ident')}>
-              鉴别接诊
-            </button>
-          </div>
-
-          {startMode === 'builtin' && (
-            <div className="case-btns">
-              {CASES.map(({ card, brief }) => (
-                <button key={card.caseId} className="case-btn" disabled={generatingAny} onClick={() => void startGame(card)}>
-                  <b>
-                    {card.patient.name} · {card.patient.age}岁 · {card.patient.gender}
-                  </b>
-                  <span>{brief}</span>
-                </button>
-              ))}
+          </header>
+        )}
+        {levelOpen && (
+        <main className={`mode-board prep-board prep-${levelOpen}`}>
+          {levelOpen === 'builtin' && (
+            <div className="archive-room">
+              <div className="case-btns archive-grid">
+                {CASES.map(({ card, brief }, idx) => (
+                  <button key={card.caseId} className={`case-btn case-folder patient-card ${card.caseId === 'anaphylaxis_01' ? 'avatar-girl' : card.caseId === 'appendicitis_01' ? 'avatar-elder' : card.patient.gender === '女' ? 'avatar-girl' : 'avatar-elder'}`} disabled={generatingAny} onClick={() => void startGame(card, 'builtin')}>
+                    <span className="folder-tab">档案 {String(idx + 1).padStart(2, '0')}</span>
+                    <span className="case-avatar" aria-hidden="true"><i /></span>
+                    <span className="case-copy">
+                      <b>
+                        {card.patient.name} · {card.patient.age}岁 · {card.patient.gender}
+                      </b>
+                      <span>{brief}</span>
+                    </span>
+                    <em>抽取病历</em>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 
-          {startMode === 'generated' && (
-            <div className="case-builder">
-              <div className="difficulty-list">
-                {CASE_DIFFICULTIES.map((d) => (
-                  <button
-                    key={d.key}
-                    className={`difficulty-option ${genDifficulty === d.key ? 'on' : ''}`}
-                    disabled={generatingCase}
-                    onClick={() => { setGenDifficulty(d.key); setGeneratedCase(null); }}
-                  >
-                    <b>{d.label}</b>
-                    <span>{d.desc}</span>
-                  </button>
-                ))}
+          {levelOpen === 'generated' && (
+            <div className="case-builder generated-builder">
+              <div className="dept-strip">
+                <div className="group-label">科室选择（随机会由系统抽签）</div>
+                <div className="chips">
+                  {['随机', ...CASE_DEPARTMENTS].map((d) => (
+                    <button
+                      key={d}
+                      className={`chip ${genDept === d ? 'on' : ''}`}
+                      disabled={generatingCase}
+                      onClick={() => { setGenDept(d); setGeneratedCase(null); }}
+                    >
+                      {d}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <div className="group-label">科室选择（随机会由系统抽签）</div>
-              <div className="chips">
-                {['随机', ...CASE_DEPARTMENTS].map((d) => (
-                  <button
-                    key={d}
-                    className={`chip ${genDept === d ? 'on' : ''}`}
-                    disabled={generatingCase}
-                    onClick={() => { setGenDept(d); setGeneratedCase(null); }}
-                  >
-                    {d}
-                  </button>
-                ))}
+
+              <div className="difficulty-columns">
+                {CASE_DIFFICULTIES.map((d) => {
+                  const stars = d.key === 'basic' ? 1 : d.key === 'advanced' ? 3 : 5;
+                  return (
+                    <section key={d.key} className={`difficulty-card diff-${d.key} ${genDifficulty === d.key ? 'on' : ''}`}>
+                      <button
+                        type="button"
+                        className="difficulty-pick"
+                        disabled={generatingCase}
+                        onClick={() => { setGenDifficulty(d.key); setGeneratedCase(null); }}
+                      >
+                        <span className="diff-badge">{d.key === 'basic' ? '低风险' : d.key === 'advanced' ? '标准局' : '高压局'}</span>
+                        <b>{d.label}</b>
+                        <span className="diff-stars" title="推荐挑战强度">{'★'.repeat(stars) + '☆'.repeat(5 - stars)}</span>
+                        <p>{d.desc}</p>
+                      </button>
+                      <button
+                        className="primary diff-generate"
+                        disabled={!llmEnabled || generatingAny}
+                        onClick={() => { setGenDifficulty(d.key); setGeneratedCase(null); void runGenerateCase(d.key); }}
+                      >
+                        {generatingCase && genDifficulty === d.key ? generationMessage || '生成中...' : llmEnabled ? '生成患者' : '需要 LLM key'}
+                      </button>
+                    </section>
+                  );
+                })}
               </div>
-              <button className="primary start-action" disabled={!llmEnabled || generatingAny} onClick={() => void runGenerateCase()}>
-                {generatingCase ? generationMessage || '生成患者中...' : llmEnabled ? '生成 AI 患者' : '需要配置 LLM key'}
-              </button>
               {generatedCase && (
                 <div className="case-preview">
                   <b>待接诊患者</b>
                   <pre>{summarizeCaseIntake(generatedCase)}</pre>
-                  <button className="primary" onClick={() => void startGame(generatedCase)}>
+                  <button className="primary" onClick={() => void startGame(generatedCase, 'generated')}>
                     开始接诊
                   </button>
                 </div>
@@ -984,9 +1176,10 @@ export default function App() {
             </div>
           )}
 
-          {startMode === 'custom' && (
-            <div className="case-builder">
-              <div className="custom-form">
+          {levelOpen === 'custom' && (
+            <div className="case-builder custom-builder">
+              <div className="form-board-title">定制病例单</div>
+              <div className="custom-form custom-case-sheet">
                 <label>
                   姓名
                   <input value={customName} onChange={(e) => setCustomName(e.target.value)} disabled={generatingAny} />
@@ -1008,14 +1201,14 @@ export default function App() {
                   <input value={customDisease} onChange={(e) => setCustomDisease(e.target.value)} disabled={generatingAny} />
                 </label>
               </div>
-              <button className="primary start-action" disabled={!llmEnabled || generatingAny} onClick={() => void runGenerateCustomCase()}>
-                {generatingCustomCase ? generationMessage || '生成患者中...' : llmEnabled ? '生成自定义患者' : '需要配置 LLM key'}
+              <button className="primary start-action custom-submit" disabled={!llmEnabled || generatingAny} onClick={() => void runGenerateCustomCase()}>
+                {generatingCustomCase ? generationMessage || '生成患者中...' : llmEnabled ? '提交会诊申请' : '需要配置 LLM key'}
               </button>
               {customGeneratedCase && (
                 <div className="case-preview">
                   <b>待接诊患者</b>
                   <pre>{summarizeCaseIntake(customGeneratedCase)}</pre>
-                  <button className="primary" onClick={() => void startGame(customGeneratedCase)}>
+                  <button className="primary" onClick={() => void startGame(customGeneratedCase, 'custom')}>
                     开始接诊
                   </button>
                 </div>
@@ -1023,11 +1216,14 @@ export default function App() {
             </div>
           )}
 
-          {startMode === 'ident' && (
-            <div className="case-builder">
-              <div className="group-label">真假病人混入候诊区，主诉不再可靠。</div>
-              <div className="rule-hint">
+          {levelOpen === 'ident' && (
+            <div className="case-builder ident-builder">
+              <div className="screen-panel">
+                <div className="screen-lights" aria-hidden="true"><span /><span /><span /></div>
+                <div className="group-label">真假病人混入候诊区，主诉不再可靠。</div>
+                <div className="rule-hint">
                 本模式会隐藏上帝视角 HP。你需要结合问诊矛盾、查体不符、检查结果和病程变化，判断该收治还是揭穿诈病。
+                </div>
               </div>
               <div className="group-label">科室选择（随机会由系统抽签）</div>
               <div className="chips">
@@ -1047,7 +1243,7 @@ export default function App() {
                 disabled={!llmEnabled || generatingAny}
                 onClick={() => void runStartIdent()}
               >
-                {generatingIdent ? generationMessage || '准备接诊中...' : llmEnabled ? '开始鉴别接诊' : '需要配置 LLM key'}
+                {generatingIdent ? generationMessage || '准备接诊中...' : llmEnabled ? '开始筛查' : '需要配置 LLM key'}
               </button>
             </div>
           )}
@@ -1062,6 +1258,7 @@ export default function App() {
 
           <div className="rule-hint">每回合 2 行动点：问诊、检查、用药消耗 1 点，手术消耗 2 点。行动点耗尽后按你的版本等待语音播完再结束回合。</div>
         </main>
+        )}
       </div>
     );
   }
@@ -1280,10 +1477,28 @@ export default function App() {
 
   return (
     <div className={`app ${critical ? 'critical' : ''}`}>
+      {settingsPanel}
+      {quitConfirm && (
+        <div className="settings-mask" onClick={() => setQuitConfirm(false)}>
+          <div className="settings-card quit-card" onClick={(e) => e.stopPropagation()}>
+            <div className="settings-head">
+              <b>退出本局看诊?</b>
+            </div>
+            <p className="quit-tip">当前进度不会保存,病人就交给别的医生了。</p>
+            <div className="quit-actions">
+              <button className="quit-stay" onClick={() => setQuitConfirm(false)}>继续看诊</button>
+              <button className="quit-leave" onClick={exitToMenu}>退出</button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* ===== 左列:患者区 + 操作区 ===== */}
       <div className="left-col">
         <div className="patient-area">
           <div className="patient-head">
+            <button className="mute-btn back-btn" title="退出看诊" onClick={() => setQuitConfirm(true)}>
+              <BackIcon />
+            </button>
             <div className="patient-info">
               <div className="patient-name">
                 {cs.patient.name} · {cs.patient.age}岁 · {cs.patient.gender}
@@ -1296,14 +1511,14 @@ export default function App() {
                   📝
                 </button>
               )}
-              <button className="mute-btn" title="2D/3D 渲染切换" onClick={() => setUse3d((v) => !v)}>
+              <button className="mute-btn render-toggle" title="2D/3D 渲染切换" onClick={() => setUse3d((v) => !v)}>
                 {use3d ? '🧊 3D' : '🎨 2D'}
               </button>
-              <button className={`mute-btn ${musicOn ? 'music-on' : ''}`} title="音乐开关" onClick={() => setMusicOn((v) => !v)}>
-                {musicOn ? '🎵' : '🎵 OFF'}
-              </button>
-              <button className="mute-btn" title="静音开关" onClick={() => setMuted((m) => !m)}>
+              <button className="mute-btn" title="一键静音(音效与语音)" onClick={() => setMuted((m) => !m)}>
                 {muted ? '🔇' : '🔊'}
+              </button>
+              <button className="mute-btn" title="游戏设置" onClick={() => setSettingsOpen(true)}>
+                ⚙️
               </button>
             </div>
           </div>
@@ -1524,7 +1739,7 @@ export default function App() {
           card={cs}
           game={game}
           review={identReview}
-          onBack={() => setGame(null)}
+          onBack={exitToMenu}
         />
       )}
 
@@ -1608,7 +1823,7 @@ export default function App() {
                 ))}
               </div>
             </details>
-            <button className="primary big" onClick={() => setGame(null)}>
+            <button className="primary big" onClick={exitToMenu}>
               返回选择病例
             </button>
           </div>
@@ -1617,21 +1832,4 @@ export default function App() {
     </div>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

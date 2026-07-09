@@ -1,7 +1,13 @@
 ﻿// 音效 —— 全部用 Web Audio 现场合成,零素材依赖。
 class Sfx {
   muted = false;
+  private level = 1;
   private ctx: AudioContext | null = null;
+
+  /** 主音量 0~1,叠乘在每个音效自带的 gain 上 */
+  setVolume(v: number) {
+    this.level = Math.min(1, Math.max(0, v));
+  }
   private alarmTimer: ReturnType<typeof setInterval> | null = null;
 
   /** 需要在用户手势里先调用一次以解锁 AudioContext */
@@ -16,7 +22,7 @@ class Sfx {
   }
 
   private tone(freq: number, dur: number, opts?: { type?: OscillatorType; gain?: number; delay?: number; slideTo?: number }) {
-    if (this.muted) return;
+    if (this.muted || this.level <= 0) return;
     try {
       const ctx = this.ensure();
       const t0 = ctx.currentTime + (opts?.delay ?? 0);
@@ -25,7 +31,7 @@ class Sfx {
       osc.type = opts?.type ?? 'sine';
       osc.frequency.setValueAtTime(freq, t0);
       if (opts?.slideTo) osc.frequency.linearRampToValueAtTime(opts.slideTo, t0 + dur);
-      const peak = opts?.gain ?? 0.12;
+      const peak = (opts?.gain ?? 0.12) * this.level;
       g.gain.setValueAtTime(0, t0);
       g.gain.linearRampToValueAtTime(peak, t0 + 0.012);
       g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
@@ -94,13 +100,27 @@ type BgmMode = 'menu' | 'normal' | 'critical';
 
 class Bgm {
   muted = false;
+  private level = 1;
   private current: HTMLAudioElement | null = null;
   private mode: BgmMode | null = null;
   private readonly tracks: Record<BgmMode, string> = {
-    menu: '/audio/title-moonlight.mp3',
+    // "Fluffing a Duck" — Kevin MacLeod (incompetech.com), CC BY 4.0,署名见 README
+    menu: '/audio/title-fluffing-a-duck.mp3',
     normal: '/audio/daily-vlog.mp3',
     critical: '/audio/morning-steps.mp3',
   };
+  // 各阶段基准响度,主音量在此之上叠乘
+  private readonly baseVolume: Record<BgmMode, number> = {
+    menu: 0.11,
+    normal: 0.12,
+    critical: 0.18,
+  };
+
+  /** 主音量 0~1,对正在播放的曲目即时生效 */
+  setVolume(v: number) {
+    this.level = Math.min(1, Math.max(0, v));
+    if (this.current && this.mode) this.current.volume = this.baseVolume[this.mode] * this.level;
+  }
 
   unlock() {
     if (!this.current) return;
@@ -117,7 +137,7 @@ class Bgm {
     this.mode = mode;
     const audio = new Audio(this.tracks[mode]);
     audio.loop = true;
-    audio.volume = mode === 'critical' ? 0.18 : mode === 'menu' ? 0.11 : 0.12;
+    audio.volume = this.baseVolume[mode] * this.level;
     this.current = audio;
     void audio.play().catch(() => undefined);
     if (previous) {
