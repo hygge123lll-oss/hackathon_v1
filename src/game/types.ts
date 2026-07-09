@@ -78,6 +78,19 @@ export interface SurgeryDef {
   wrongEffect?: { rateDelta: number; label: string };
 }
 
+/**
+ * 鉴别接诊模式:真假病人档案。缺省 = 普通模式,引擎与各 Agent 完全忽略该字段。
+ * 除 isFake(开局代码抽签、整局冻结)外,所有内容由出题 LLM 每局现场生成,不做枚举。
+ */
+export interface DeceptionProfile {
+  isFake: boolean;
+  /** 以下仅诈病病例存在 */
+  motive?: string; // 装病动机(自由生成:骗假条/骗药/逃避某事…)
+  claimedDisease?: string; // 他声称/表演的疾病
+  psychProfile?: string; // 心理侧写:多沉得住气、被质疑时的反应、什么情况下会崩
+  goal?: string; // 他具体想从医生手里拿到什么(得逞判定的依据)
+}
+
 export interface CaseCard {
   caseId: string;
   trueDiagnosis: string;
@@ -108,6 +121,8 @@ export interface CaseCard {
   evalNotes: string;
   /** 结构化评分表:总分 = 达标权重加权和(代码计算,LLM 只做判定题) */
   rubric: RubricCriterion[];
+  /** 鉴别接诊模式专用,普通病例省略 */
+  deception?: DeceptionProfile;
 }
 
 export interface RubricCriterion {

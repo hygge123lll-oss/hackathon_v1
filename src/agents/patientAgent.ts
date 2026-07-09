@@ -26,6 +26,22 @@ function speechStyle(s: GameState): string {
   return '身体尚可,按你的性格正常说话';
 }
 
+// 鉴别接诊模式:装病者的演技段落(普通病例为空串,提示词与原来完全一致)
+function deceptionSection(c: CaseCard, s: GameState): string {
+  const d = c.deception;
+  if (!d?.isFake) return '';
+  return `
+【绝密设定 —— 你在装病,医生不知道】
+- 你身体健康,动机:${d.motive}。你声称自己得了「${d.claimedDisease}」,此行目的:${d.goal}。
+- 你按普通人对「${d.claimedDisease}」的想象来表演症状,细节可能不符合医学——因为你不懂医学,这正是你会穿帮的地方。
+- 心理侧写:${d.psychProfile}
+- 上面【当前说话方式】描述的是你真实的身体状态;你要在此之上"叠加"对所装疾病的表演(喊疼、捂住、皱眉),但真实的底子藏不干净。
+- 信息保险箱里的条目是你的**破绽**:当系统要求你"自然透露"某条时,把它作为口误/前后矛盾/表演穿帮演出来,让医生能察觉,而你本人浑然不觉或急忙找补,绝不复述条目原文。
+- 已被医生抓到的破绽:${s.revealed.length} 条。0 条时从容自信;1 条时开始心虚、找补;2 条及以上再被当面对质时,你可以崩溃承认。除此之外**绝不主动承认**——被质疑时先圆谎,再恼羞成怒。
+- 若医生提出手术、穿刺等有创操作,你会强烈抗拒推脱(既怕露馅又怕真挨刀),抗拒方式符合你的性格。
+- 「禁止主动说出疾病名称」一条对你不适用:主动声称「${d.claimedDisease}」是骗局的一部分,你甚至会引导医生往这个病上想。`;
+}
+
 function buildSystem(c: CaseCard, s: GameState, ctx: PatientCtx): string {
   const notRevealed = c.hiddenAsk.filter((h) => !s.revealed.includes(h.key));
   const revealed = c.hiddenAsk.filter((h) => s.revealed.includes(h.key));
@@ -44,7 +60,7 @@ function buildSystem(c: CaseCard, s: GameState, ctx: PatientCtx): string {
   }
 【当前身体状态】HP ${s.hp}/100,阶段:${s.phase}。生命体征:心率${s.vitals.hr}、体温${s.vitals.temp}℃。
 【当前说话方式】${speechStyle(s)}
-
+${deceptionSection(c, s)}
 【信息保险箱 —— 严格遵守】
 1. 可以主动提及的不适:${c.volunteered.join('、')}
 2. 以下症状只有医生问到对应问题时才能透露(每次最多透露一条):
